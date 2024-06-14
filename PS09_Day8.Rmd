@@ -1,0 +1,855 @@
+---
+title: "PS09_day6"
+author: "Chandrima"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+BiocManager::install("EnhancedVolcano")
+# install.packages("remotes")
+# ?install.packages
+# install.packages("Matrix", type = "source")
+# install.packages("SeuratObject", force = T)
+# install.packages("Seurat", force = T)
+# remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = T)
+# install.packages('devtools')
+# devtools::install_github('immunogenomics/presto')
+```
+
+```{r library}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(Matrix)
+library(tidyverse)
+library(glmGamPoi)
+# library(reticulate)
+# library(biomaRt)
+library(cowplot)
+library(DoubletFinder)
+library(mixtools)
+library(EnhancedVolcano)
+
+```
+
+```{r check directory}
+plan("multisession")
+set.seed(1234)
+future::plan("multicore")
+options(future.globals.maxSize = 8000 * 1024^2)
+
+#check directory
+here()
+```
+
+```{r Working Directory}
+getwd()
+# setwd("C:/Sen_Lab/")
+# list.files()
+```
+
+
+```{r}
+perturb.data <- Read10X(data.dir = "/Users/senlab/Chandrima_files/PS09_D8/PS09_D8/filtered_feature_bc_matrix")
+```
+
+# Renaming of antibodies
+```{r}
+rownames(perturb.data$`Antibody Capture`) <- gsub("_", "-", rownames(perturb.data$`Antibody Capture`))
+```
+
+# Making of Seurat Objects of the perturb seq data set
+```{r}
+perturb <- CreateSeuratObject(counts = perturb.data$`Gene Expression`, project = "PS09_D8")
+```
+
+# Adding CRISPR metadata to main meta.data
+```{r Converting CRISPR seurat object to a dataframe}
+perturb_seq.df <- data.frame(perturb.data$`CRISPR Guide Capture`, check.names = FALSE)
+```
+
+```{r Function for naming}
+# Function to remove the numbers in the gene_ids
+name_clean = function(x){
+  result_vector <- c()
+  for (i in x){
+    y <- substr(i, 1,nchar(i)-2)
+    result_vector <- c(result_vector, y)
+  }
+  return(result_vector)
+}
+```
+
+```{r Making a dummy dataframe new_df}
+# Making the column names of perturb_seq.df and assigning them as rownames of new_df
+cols <- colnames(perturb_seq.df)
+new_df <- data.frame(matrix(ncol = 0, nrow = length(cols)))
+rownames(new_df) <- cols
+
+# Taking the last character of barcodes as sample number
+new_df$sample_num <- substr(cols, nchar(cols), nchar(cols))
+
+# Adding columns to new_df
+new_df$sample_name <- 'PSO9D8'
+new_df$`sgRNAs_3+` <- 'none'
+new_df$`targets_3+`	<- 'none'
+new_df$`sgRNAs_2+`	<- 'none'
+new_df$`targets_2+` <- 'none'
+new_df$guide_ids <- 'none'
+new_df$gene_ids <- 'none'
+new_df$crispr_perturbation <- 'none'
+```
+
+```{r guide list that are perturbed }
+guide_set = c('EOMES', 'BC', 'TOX', 'JUN', 'CD8A', 'CDKN1B', 'TBX21', 'ARID1A')
+```
+
+
+```{r Adding gene columns to new_df}
+for (i in guide_set){
+    new_df[[i]] <- 'none'
+}
+```
+
+```{r Making the metadata}
+for (i in 1:length(cols)){
+    # For each barcode in perturb_seq.df, selecting only rows that have non zero values and adding them to guide_ids
+    result <- rownames(perturb_seq.df)[perturb_seq.df[, cols[i]] >=1 ]
+    new_df[i,'guide_ids'] <- paste(result, collapse = ", ")
+    
+    # Cleaning the names of guide RNAs and storing them in gene_ids column
+    guide_name <- name_clean(strsplit(new_df[i, 'guide_ids'],',')[[1]])
+    new_df[i,'gene_ids'] <- paste(guide_name, collapse = ", ")
+    
+    #If there are more than 1 guide RNA
+    if (length(strsplit(new_df[i, 'guide_ids'],',')[[1]])> 1){
+      new_df[i,'sgRNAs_3+'] <- 'multi'
+      new_df[i,'sgRNAs_2+'] <- 'multi'
+      new_df[i,'targets_3+'] <- 'multi'
+      new_df[i,'targets_2+'] <- 'multi'
+    }# for one guide RNA storing the name of the guide RNA 
+    else if (length(strsplit(new_df[i,  'guide_ids'],',')[[1]])== 1){
+      new_df[i,'sgRNAs_3+'] <- new_df[i,'guide_ids']
+      new_df[i,'sgRNAs_2+'] <- new_df[i,'guide_ids']
+      new_df[i,'targets_3+'] <- substr(new_df[i,'guide_ids'], 1, nchar(new_df[i,'guide_ids'])-2)
+      new_df[i,'targets_2+'] <- substr(new_df[i,'guide_ids'], 1, nchar(new_df[i,'guide_ids'])-2)
+    }# for no guide RNA
+    else{
+      new_df[i,'sgRNAs_3+'] <- 'none'
+      new_df[i,'sgRNAs_2+'] <- 'none'
+    }
+    #Adding guide RNAs detected for each barcode in crispr_perturbation column
+    new_df[i,'crispr_perturbation'] <- length(strsplit(new_df[i, 'guide_ids'],',')[[1]])
+}
+
+```
+
+```{r Assigning boolean values to each guide for each cell}
+for (i in 1:length(cols)){
+  guide_list <- trimws(strsplit(new_df[i, 'gene_ids'],',')[[1]])
+  for (j in guide_set){
+    if (j %in% guide_list){
+      new_df[i, j] <- 1
+    }else{
+       new_df[i, j] <- 0 
+      }
+  }
+ 
+}
+```
+
+```{r renaming the column names of genes boolean}
+for (i in guide_set){
+  t <- paste0(i,"_bool")
+  names(new_df)[names(new_df) == i] <- t
+}
+```
+
+# Adding metadata of CRISPR Knockout
+```{r }
+perturb@meta.data <- cbind(perturb@meta.data, new_df)
+```
+
+
+```{r Adding other assays}
+# Converting crispr counts matrix to seurat assay object
+perturb[['CRISPR']] = CreateAssayObject(counts = perturb.data$`CRISPR Guide Capture`)
+# head(perturb@meta.data, 10)
+# Making antibody capture as new assay
+perturb[["HTO"]] = CreateAssayObject(counts = perturb.data$`Antibody Capture`)
+```
+
+# Setting the transcript counts matrix as the default assay matrix
+```{r}
+DefaultAssay(perturb) = "RNA"
+```
+
+# Revision into using Seurat functions to calculate each type of unnecessary transcripts in the experiment
+```{r Using of dyplr package and lambda function for calculating multi type of transcripts percent count}
+addperRNAcount <- function(seuratobject, type_rna, pattern){
+  seuratobject[[type_rna]] <- PercentageFeatureSet(seuratobject, pattern = pattern)
+  return(seuratobject)
+}
+perturb <- perturb %>%
+  (function(x) addperRNAcount(x,"percent.mt", "^MT-"))%>%
+  (function(x) addperRNAcount(x,"percent.rb", "^RP[SL]"))%>%
+  (function(x) addperRNAcount(x,"percent.hb", "^HB[^(P)]"))%>%
+  (function(x) addperRNAcount(x,"percent.plat", "PECAM1|PF4"))
+  
+```
+
+```{r}
+mean(perturb@meta.data$percent.mt) 
+mean(perturb@meta.data$percent.rb) 
+mean(perturb@meta.data$percent.hb) 
+mean(perturb@meta.data$percent.plat)
+```
+# QC threshold to remove cells with higher mitochondrial, ribosomal, hb, and plat transcripts
+```{r}
+perturb.after_qc <- subset(perturb, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & 
+                    percent.mt < 10 & percent.rb > 5 & percent.hb < 1 & percent.plat < 0.1)
+```
+
+
+# Plots
+```{r Pearson correlation plot between the data points of Unfiltered data}
+# pdf("FeatureScatter_unfiltered.pdf", height = 3, width = 5)
+FeatureScatter(perturb, "nCount_RNA", "nFeature_RNA", pt.size = 0.5) + plot_annotation("Pearson correlation between cell and transcripts count of Unfiltered data")
+```
+
+```{r Visualize QC metrics as a violin plot of unfiltered data and filtered data}
+# pdf("VlnPlot_unfiltered_data.pdf", height = 8, width = 10)
+
+plot_grid(ncol = 2, 
+        VlnPlot(perturb, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb","percent.hb", "percent.plat"), 
+        pt.size = 0, 
+        ncol = 3) + 
+        NoLegend() + 
+        plot_annotation ("Unfiltered data", theme = theme(plot.title = element_text(size = 28))
+        ),
+VlnPlot(perturb.after_qc, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb","percent.hb", "percent.plat"), 
+        pt.size = 0, 
+        ncol = 3) + 
+        NoLegend() + 
+        plot_annotation("Filtered data", theme = theme(plot.title = element_text(size = 28))
+        ))
+```
+
+# Cell cycle scoring analysis Using Original protocol of log normalize 
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+```{r Normalization, Finding variable genes, Scaling, Cellcycle Score in metadata}
+perturb.after_qc <- perturb.after_qc %>% 
+  NormalizeData(verbose = F) %>% 
+  FindVariableFeatures(selection.method = "vst", verbose = F) %>%
+  ScaleData(vars.to.regress = c("nFeature_RNA", "percent.mt"),  verbose = F) %>%
+  CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+```
+
+# PCA Prior scaling out cell cycle variance for genes in cell phases
+```{r running pca for genes prior to cell cycle scoring}
+perturb.seq <- RunPCA(perturb.after_qc, reduction.name = "pca_nocycle_scoring", reduction.key = "PC_NCCS", verbose = F)
+```
+```{r Elbow plot PCA}
+ElbowPlot(perturb.at_new_qc_lognorm_non_phase, ndims = 60, reduction = "pca_priorphareg_")
+```
+
+# Expect 4% doublets when loading ~10K cells
+```{r}
+nExp <- round(ncol(perturb.seq) * 0.04)
+perturb.seq <- doubletFinder(perturb.seq, pN = 0.25, pK = 0.09, nExp = nExp, PCs = 1:10)
+DF.name <- grep("DF.classifications", colnames(perturb.seq@meta.data), value = T)
+plot_grid(ncol = 2, DimPlot(perturb.seq, group.by = "orig.ident"),
+                   DimPlot(perturb.seq, group.by = DF.name))
+```
+
+# Remove all Doublets columns
+
+```{r}
+perturb.seq <- subset(perturb.seq, DF.classifications_0.25_0.09_327 == 'Singlet')
+```
+
+```{r}
+saveRDS(perturb.seq, "PS09D8_singlet.RDS")
+```
+
+#########################################################################################################################
+
+# Demultiplexing hastags
+```{r steps are antibody capture normalization, and demutiplexing}
+perturb.seq <- readRDS("PS09D8_singlet.RDS")
+perturb.seq <- perturb.seq %>% NormalizeData(assay = "HTO", normalization.method = "CLR") %>%
+  HTODemux(assay = "HTO", positive.quantile = 0.99)
+```
+#Info on singlets, doublets and negative in antibody capture
+```{r}
+table(perturb.seq$HTO_classification.global)
+```
+
+# Plots
+```{r}
+# rownames(perturb.at_new_qc_lognorm@assays$HTO)
+RidgePlot(perturb.seq, assay = "HTO", 
+          features = c("hashtag-1", "hashtag-2"), 
+          ncol = 2)
+```
+
+```{r}
+VlnPlot(perturb.seq, features = "nCount_RNA", group.by = "HTO_classification.global", pt.size = 0.1, log = TRUE)
+```
+# Removing umbigious tags
+```{r}
+perturb.seq <- subset(perturb.seq, HTO_classification.global != "Negative")
+```
+# Plots
+```{r}
+
+RidgePlot(perturb.seq, assay = "HTO", features = c("hashtag-1", "hashtag-2"), 
+          group.by = "HTO_classification.global", ncol = 2)
+```
+
+```{r Looking at distribution of Singlets and Doublets distribution in Antibody capture assay}
+perturb.seq <- perturb.seq %>% 
+  ScaleData(features = rownames(perturb.seq@assays$HTO), assay = "HTO", verbose = F) %>% 
+  RunPCA(assay = "HTO", reduction.name = "pca_condi", reduction.key = "PC_COND", features = rownames(perturb.seq@assays$HTO), approx = F, verbose = F) %>%
+  RunTSNE(reduction = "pca_condi",reduction.name = "tsne_condi",reduction.key = "tSNE_COND", dims = 1:10, perplexity = 100, check_duplicates = FALSE)
+```
+
+#Don't run this unless two many duplicate pc cells
+```{r duplicate removal}
+# Extract PCA embeddings
+pca_embeddings <- perturb.at_new_qc_lognorm_non_phase@reductions$pca_antibc_@cell.embeddings
+
+# Identify duplicate rows based on PCA embeddings
+duplicate_indices <- which(duplicated(pca_embeddings))
+
+
+# If there are duplicates, remove them
+if (length(duplicate_indices) > 0) {
+  unique_cells <- rownames(pca_embeddings)[-duplicate_indices]
+
+  # Subset the Seurat object to remove duplicate cells
+  perturb.at_new_qc_lognorm_non_phase <- subset(perturb.at_new_qc_lognorm_non_phase, cells = unique_cells)
+}
+
+# Now run t-SNE
+perturb.at_new_qc_lognorm_non_phase <- RunTSNE(perturb.at_new_qc_lognorm_non_phase,
+                                               reduction = "pca_antibc_",
+                                               reduction.name = "tsne_antibc_",
+                                               reduction.key = "tSNE_ATBC_",
+                                               dims = 1:8, perplexity = 100)
+
+```
+
+
+# Plots
+```{r}
+DimPlot(perturb.seq, group.by = "HTO_classification.global", reduction = "tsne_condi")
+```
+
+```{r}
+HTOHeatmap(perturb.seq, assay = "HTO")
+```
+
+# Removing Doublets
+```{r}
+perturb.seq <- subset(perturb.seq, HTO_classification.global != "Doublet")
+```
+
+# Plots
+```{r}
+RidgePlot(perturb.seq, group.by = "HTO_classification.global", assay = "HTO", 
+          features = c("hashtag-1", "hashtag-2"), ncol = 2)
+```
+
+```{r}
+HTOHeatmap(perturb.seq, assay = "HTO")
+```
+
+```{r examine for the potential presence of batch effects}
+# Select the top 2000 most variable features
+perturb.seq <- perturb.seq %>% 
+  FindVariableFeatures(selection.method = "mean.var.plot", nfeatures = 2000) %>%
+  ScaleData( features = VariableFeatures(perturb.seq)) %>%
+  RunPCA(features = VariableFeatures(perturb.seq), reduction.name = "pca_onecondi", reduction.key = "PC_OCOND", approx = F, verbose = F)
+```
+
+# Plots
+```{r Elbow}
+ElbowPlot(perturb.seq, ndims = 60, reduction = "pca_onecondi")
+```
+
+```{r}
+# We select the top 10 PCs for clustering and tSNE based on PCElbowPlot
+perturb.seq <- perturb.seq %>% 
+  FindNeighbors(reduction = "pca_onecondi", dims = 1:10) %>%
+  FindClusters(resolution = 0.6, verbose = FALSE) %>% 
+  RunTSNE(reduction.name = "tsne_onecondi_",reduction.key = "tSNE_OCOND_", reduction = "pca_onecondi", 
+          dims = 1:15, check_duplicates = FALSE)
+```
+# Plots
+```{r}
+# Projecting singlet identities on TSNE visualization
+DimPlot(perturb.seq, reduction = "tsne_onecondi_", group.by = "HTO_classification")
+```
+
+```{r}
+plot_grid(ncol = 2, VlnPlot(perturb.seq,assay = "CRISPR",features = c("CDKN1B-1","CDKN1B-2","CDKN1B-3","CDKN1B-4","CDKN1B-5"),group.by = "HTO_classification" , pt.size = 0.01),
+          VlnPlot(perturb.seq,assay = "RNA",
+        features = c("CD8A","CD8B","TOX","EOMES","TBX21","JUN","ARID1A","CDKN1B"), group.by = "HTO_classification", pt.size = 0.01))
+```
+# Save progress
+```{r}
+saveRDS(perturb.seq, "PS09D8_DIMULTI_HASH.RDS")
+```
+
+```{r}
+# find DGE between acute and chronic conditions
+DE.between_condition <- FindMarkers(perturb.seq, group.by = "HTO_classification", ident.1 = "hashtag-1", ident.2 = "hashtag-2")
+
+```
+
+```{r}
+
+EnhancedVolcano(
+    toptable = DE.between_condition,
+    lab = rownames(DE.between_condition),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05)
+```
+```{r}
+# Select the top 10% of genes
+top_10_percent_genes <- DE.between_condition[1:ceiling(0.10 * nrow(DE.between_condition)), ]
+write_csv(top_10_percent_genes,"top_10_percent_conditions.csv")
+```
+
+
+########################################################################################################################
+# Perturb signature 
+```{r}
+perturb.seq <- readRDS("PS09D8_DIMULTI_HASH.RDS")
+perturb.seq <- subset(perturb.seq, crispr_perturbation == 1)
+```
+
+# Plots
+```{r}
+DotPlot(perturb.seq, group.by = "HTO_classification", features = c("CD8A","CD8B","TOX","EOMES","TBX21","JUN","ARID1A","CDKN1B"))
+```
+
+```{r}
+plot_grid(ncol = 3, 
+          VlnPlot(perturb.seq,features = c("CD8A","CD8B"), group.by = "CD8A_bool", pt.size = 0),
+          VlnPlot(perturb.seq,features = c("JUN"), group.by = "JUN_bool", pt.size = 0), 
+          VlnPlot(perturb.seq,features = c("ARID1A"), group.by = "ARID1A_bool", pt.size = 0), 
+          VlnPlot(perturb.seq,features = c("TOX"), group.by = "TOX_bool", pt.size = 0), 
+          VlnPlot(perturb.seq,features = c("EOMES"), group.by = "EOMES_bool", pt.size = 0), 
+          VlnPlot(perturb.seq,features = c("CDKN1B"), group.by = "CDKN1B_bool", pt.size = 0),
+          VlnPlot(perturb.seq,features = c("TBX21"), group.by = "TBX21_bool", pt.size = 0) 
+          )
+
+```
+
+
+```{r}
+perturb.seq@meta.data <- perturb.seq@meta.data %>%
+  mutate(perturb_state = if_else(gene_ids == "BC",'NT','Perturbed'), 
+                                 conditions = if_else(HTO_classification == 'hashtag-1', 'acute', 'chronic'))
+
+```
+
+
+```{r}
+table(perturb.seq@meta.data$perturb_state)
+```
+
+```{r}
+
+perturb.seq <- CalcPerturbSig(perturb.seq, 
+                               assay = "RNA", 
+                               slot = "data", 
+                               gd.class = "gene_ids", 
+                               nt.cell.class = "BC", 
+                               reduction = "pca_nocycle_scoring", 
+                               num.neighbors = 20,
+                               ndims = 10, 
+                               new.assay.name = "PRTB")
+```
+
+
+```{r}
+# Prepare PRTB assay for dimensionality reduction: 
+# # Normalize data, find variable features and center data.
+# DefaultAssay(object = eccite) <- 'PRTB'
+
+# Use variable features from RNA assay.
+VariableFeatures(perturb.seq) <- VariableFeatures(object = perturb.seq[["RNA"]])
+
+#Scale data of PRTB, RunPCA, and Tnse
+perturb.seq <- perturb.seq %>% 
+  ScaleData(assay = "PRTB", do.scale = F, do.center = T) %>%
+  RunPCA(assay = "PRTB", features = VariableFeatures(perturb.seq),  reduction.key = 'prtbpca', reduction.name = 'prtbpca', verbose = F) %>%
+  RunTSNE(dims = 1:40, reduction = 'prtbpca', reduction.key = 'prtbtsne', reduction.name = 'prtbtsne')
+```
+
+# Plots
+```{r}
+# Projecting singlet identities on TSNE visualization
+DimPlot(perturb.seq, reduction = "prtbtsne", group.by = "conditions",  
+  ncol = 1, 
+  pt.size = 0.2)
+```
+```{r}
+?RunMixscape
+```
+
+
+
+```{r}
+# install.packages('mixtools')
+# Run mixscape.
+perturb.seq <- RunMixscape(
+  perturb.seq, 
+  assay = "PRTB", 
+  slot = "scale.data", 
+  labels = "gene_ids",
+  nt.class.name = "BC",
+  min.de.genes = 5, 
+  iter.num = 10, 
+  de.assay = "RNA", 
+  verbose = F,
+  prtb.type = "KO")
+```
+
+
+```{r}
+saveRDS(perturb.seq, "PS09D6_mixscape.RDS")
+table(perturb.seq$mixscape_class.global)
+```
+
+```{r}
+perturb.seq <- readRDS("PS09D6_mixscape.RDS")
+```
+
+
+```{r}
+# dummy.cd8_t1 <- subset(perturb.tag1.mixscape, CD8A_bool == 1)
+dummy.not_gcd8 <- subset(perturb.seq, EOMES_bool == 1|BC_bool == 1|TOX_bool == 1|JUN_bool == 1|ARID1A_bool == 1| CDKN1B_bool == 1)
+
+```
+
+```{r}
+# png("crispr_ps09_d6.png", 800, 600)
+plot_grid(ncol = 2, 
+          VlnPlot(perturb.seq, features = c("CD8A", "CD8B"), group.by = "mixscape_class") + plot_annotation ("CD8 sgRNA", theme = theme(plot.title = element_text(size = 22))), 
+          VlnPlot(dummy.not_gcd8, features = c("CD8A", "CD8B"), group.by = "mixscape_class.global") + plot_annotation ("all other sgRNA", theme = theme(plot.title = element_text(size = 22))))
+# dev.off()
+```
+
+```{r}
+# We select the top 10 PCs for clustering and tSNE based on PCElbowPlot
+perturb.seq <- perturb.seq %>% 
+  RunPCA(assay = "PRTB", features = VariableFeatures(perturb.seq[["RNA"]]),  reduction.key = 'prtbpcamix', reduction.name = 'prtbpcamix', verbose = F) %>%
+  FindNeighbors(reduction = "prtbpcamix", dims = 1:10) %>%
+  FindClusters(resolution = 0.6, verbose = FALSE) %>%
+  RunTSNE(dims = 1:40, reduction = 'prtbpcamix', reduction.key = 'prtbtsnemix', reduction.name = 'prtbtsnemix')
+```
+
+```{r}
+DimPlot(perturb.seq, reduction = "prtbtsnemix", group.by = "mixscape_class",  
+  ncol = 1, 
+  pt.size = 0.2)
+```
+
+```{r}
+unique(perturb.seq$mixscape_class)
+```
+
+```{r}
+?FindMarkers
+```
+
+
+```{r}
+# find DGE between acute and chronic conditions
+# DgE.gCD8_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CD8A NP", ident.2 = c("TBX21 NP","BC","TOX NP","EOMES NP","ARID1A NP","JUN NP","CDKN1B NP"))
+DgE.gCD8_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CD8A NP")
+DgE.gCDKN1B_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CDKN1B NP")
+DgE.gTBX21_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TBX21 NP")
+DgE.gBC_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "BC")
+DgE.gTOX_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TOX NP")
+DgE.gEOMES_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "EOMES NP")
+DgE.gARID1A_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "ARID1A NP")
+DgE.gJUN_others <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "JUN NP")
+```
+# Plots
+```{r}
+# library(EnhancedVolcano)
+png("CD8AgVSotherguides.png", width = 1024, height = 900)
+plot_grid(ncol = 5, 
+    EnhancedVolcano(
+    toptable = DgE.gCD8_others,
+    lab = rownames(DgE.gCD8_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gCD8 vs othersgs"),
+
+EnhancedVolcano(
+    toptable = DgE.gCDKN1B_others,
+    lab = rownames(DgE.gCDKN1B_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gCDKN1B VS othersgs"),
+EnhancedVolcano(
+    toptable = DgE.gTBX21_others,
+    lab = rownames(DgE.gTBX21_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gTBX21 vs othersgs"),
+EnhancedVolcano(
+    toptable = DgE.gTOX_others,
+    lab = rownames(DgE.gTOX_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gTOX vs othersgs"),
+EnhancedVolcano(
+    toptable = DgE.gEOMES_others,
+    lab = rownames(DgE.gEOMES_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gEOMES vs othersgs"),
+EnhancedVolcano(
+    toptable = DgE.gBC_others,
+    lab = rownames(DgE.gBC_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gBC vs othersgs"),
+EnhancedVolcano(
+    toptable = DgE.gJUN_others,
+    lab = rownames(DgE.gJUN_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gCD8 vs gJUN"),
+EnhancedVolcano(
+    toptable = DgE.gARID1A_others,
+    lab = rownames(DgE.gARID1A_others),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "gARID1A vs othersgs"))
+dev.off()
+```
+
+```{r DGE CD8}
+Idents(perturb.seq) <- "conditions"
+DgE.gCD8.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CD8A NP", subset.ident = "chronic")
+DgE.gCD8.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CD8A NP", subset.ident = "acute")
+DgE.gCDKN1B.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CDKN1B NP", subset.ident = "chronic")
+DgE.gCDKN1B.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "CDKN1B NP", subset.ident = "acute")
+DgE.gEOMES.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "EOMES NP", subset.ident = "chronic")
+DgE.gEOMES.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "EOMES NP", subset.ident = "acute")
+DgE.gTOX.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TOX NP", subset.ident = "chronic")
+DgE.gTOX.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TOX NP", subset.ident = "acute")
+DgE.gJUN.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "JUN NP", subset.ident = "chronic")
+DgE.gJUN.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "JUN NP", subset.ident = "acute")
+plot_grid(ncol = 2)
+DgE.gTBX21.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TBX21 NP", subset.ident = "chronic")
+DgE.gTBX21.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "TBX21 NP", subset.ident = "acute")
+plot_grid(ncol = 2)
+DgE.gARID1A.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "ARID1A NP", subset.ident = "chronic")
+DgE.gARID1A.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "ARID1A NP", subset.ident = "acute")
+```
+
+```{r}
+DgE.gBC.chronic <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "BC", subset.ident = "chronic")
+DgE.gBC.acute <- FindMarkers(perturb.seq, group.by = "mixscape_class", ident.1 = "BC", subset.ident = "acute")
+```
+
+```{r}
+png("sg4_in_condition_dge.png", width = 800, height = 600)
+plot_grid(ncol = 2, EnhancedVolcano(
+    toptable = DgE.gARID1A.chronic,
+    lab = rownames(DgE.gARID1A.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide ARID1A"),
+    EnhancedVolcano(
+    toptable = DgE.gARID1A.acute,
+    lab = rownames(DgE.gARID1A.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide ARID1A"),
+    EnhancedVolcano(
+    toptable = DgE.gBC.chronic,
+    lab = rownames(DgE.gBC.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide BC"),
+    EnhancedVolcano(
+    toptable = DgE.gBC.acute,
+    lab = rownames(DgE.gBC.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide BC"))
+dev.off()
+```
+
+```{r}
+png("sg1_in_condition_dge.png", width = 800, height = 600)
+plot_grid(ncol = 2,
+          EnhancedVolcano(
+    toptable = DgE.gCD8.chronic,
+    lab = rownames(DgE.gCD8.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide CD8"),
+    EnhancedVolcano(
+    toptable = DgE.gCD8.acute,
+    lab = rownames(DgE.gCD8.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide CD8"),
+    EnhancedVolcano(
+    toptable = DgE.gCDKN1B.chronic,
+    lab = rownames(DgE.gCDKN1B.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide CDKN1B"),
+    EnhancedVolcano(
+    toptable = DgE.gCDKN1B.acute,
+    lab = rownames(DgE.gCDKN1B.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide CDKN1B"))
+dev.off()
+```
+```{r}
+png("sg2_in_condition_dge.png", width = 800, height = 600)
+plot_grid(ncol = 2,
+    EnhancedVolcano(
+    toptable = DgE.gEOMES.chronic,
+    lab = rownames(DgE.gEOMES.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide EOMES"),
+    EnhancedVolcano(
+    toptable = DgE.gEOMES.acute,
+    lab = rownames(DgE.gEOMES.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide EOMES"),
+    EnhancedVolcano(
+    toptable = DgE.gTOX.chronic,
+    lab = rownames(DgE.gTOX.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide TOX"),
+    EnhancedVolcano(
+    toptable = DgE.gTOX.acute,
+    lab = rownames(DgE.gTOX.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide TOX"))
+dev.off()
+```
+```{r}
+png("sg3_in_condition_dge.png", width = 800, height = 600)
+plot_grid(ncol = 2, EnhancedVolcano(
+    toptable = DgE.gJUN.chronic,
+    lab = rownames(DgE.gJUN.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide JUN"),
+    EnhancedVolcano(
+    toptable = DgE.gJUN.acute,
+    lab = rownames(DgE.gJUN.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide JUN"), 
+    EnhancedVolcano(
+    toptable = DgE.gTBX21.chronic,
+    lab = rownames(DgE.gTBX21.chronic),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Chronic in presence of guide TBX21"),
+    EnhancedVolcano(
+    toptable = DgE.gTBX21.acute,
+    lab = rownames(DgE.gTBX21.acute),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    FCcutoff = 0.5,
+    pCutoff = 0.05,
+    title = "DGE in Acute in presence of guide TBX21") )
+dev.off()
+```
+
+
+```{r}
+# Select the top 10% of genes
+top_10_percent_gCD8_others <- DgE.gCD8_others[1:ceiling(0.10 * nrow(DgE.gCD8_others)), ]
+write_csv(top_10_percent_gCD8_others,"top_10_percent_gCD8_others.csv")
+#Note the if ident.2 is not provided the it is automatically compared with others
+```
